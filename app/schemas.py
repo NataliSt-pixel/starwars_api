@@ -1,36 +1,38 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 from typing import Optional
 from datetime import datetime
 
 
-class CharacterBase(BaseModel):
-    uid: int = Field(..., description="Уникальный ID из SWAPI")
-    name: str = Field(..., min_length=1, max_length=100, description="Имя персонажа")
-    birth_year: Optional[str] = Field(None, description="Год рождения")
-    eye_color: Optional[str] = Field(None, description="Цвет глаз")
-    gender: Optional[str] = Field(None, description="Пол")
-    hair_color: Optional[str] = Field(None, description="Цвет волос")
-    homeworld: Optional[str] = Field(None, description="Родная планета (URL)")
-    mass: Optional[str] = Field(None, description="Масса")
-    skin_color: Optional[str] = Field(None, description="Цвет кожи")
+class UserBase(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    email: EmailStr = Field(...)
 
 
-class CharacterCreate(CharacterBase):
+class AdvertisementBase(BaseModel):
+    title: str = Field(..., min_length=3, max_length=100)
+    description: str = Field(..., min_length=10, max_length=1000)
+
+
+class UserCreate(UserBase):
+    password: str = Field(..., min_length=6)
+
+
+class AdvertisementCreate(AdvertisementBase):
     pass
 
 
-class CharacterUpdate(BaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=100)
-    birth_year: Optional[str] = None
-    eye_color: Optional[str] = None
-    gender: Optional[str] = None
-    hair_color: Optional[str] = None
-    homeworld: Optional[str] = None
-    mass: Optional[str] = None
-    skin_color: Optional[str] = None
+class UserUpdate(BaseModel):
+    username: Optional[str] = Field(None, min_length=3, max_length=50)
+    email: Optional[EmailStr] = None
+    password: Optional[str] = Field(None, min_length=6)
 
 
-class CharacterResponse(CharacterBase):
+class AdvertisementUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=3, max_length=100)
+    description: Optional[str] = Field(None, min_length=10, max_length=1000)
+
+
+class UserResponse(UserBase):
     id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -39,8 +41,44 @@ class CharacterResponse(CharacterBase):
         from_attributes = True
 
 
-class CharacterListResponse(BaseModel):
-    items: list[CharacterResponse]
+class AdvertisementResponse(AdvertisementBase):
+    id: int
+    user_id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    user: Optional[UserResponse] = None
+
+    class Config:
+        from_attributes = True
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class TokenData(BaseModel):
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class PaginationParams(BaseModel):
+    page: int = Field(1, ge=1)
+    size: int = Field(10, ge=1, le=100)
+
+
+class AdvertisementFilterParams(BaseModel):
+    user_id: Optional[int] = None
+    search: Optional[str] = None
+
+
+class AdvertisementListResponse(BaseModel):
+    items: list[AdvertisementResponse]
     total: int
     page: int
     size: int
@@ -50,14 +88,3 @@ class CharacterListResponse(BaseModel):
 class ErrorResponse(BaseModel):
     error: str
     detail: Optional[str] = None
-
-
-class PaginationParams(BaseModel):
-    page: int = Field(1, ge=1, description="Номер страницы")
-    size: int = Field(10, ge=1, le=100, description="Размер страницы")
-
-
-class CharacterFilterParams(BaseModel):
-    name: Optional[str] = None
-    gender: Optional[str] = None
-    homeworld: Optional[str] = None

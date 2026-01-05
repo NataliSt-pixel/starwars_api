@@ -1,440 +1,309 @@
 """
-Простой запуск Star Wars API
+Упрощенный запуск Advertisements API с SQLite
 """
 import asyncio
-import logging
-from aiohttp import web
 import aiosqlite
-import os
-from dotenv import load_dotenv
+from aiohttp import web
+import logging
+import json
+import hashlib
+import secrets
+from datetime import datetime, timedelta
+import jwt
 
-load_dotenv()
-
-logging.basicConfig(
-    level=os.getenv('LOG_LEVEL', 'INFO'),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-HOST = os.getenv('HOST', '0.0.0.0')
-PORT = int(os.getenv('PORT', 8000))
-DB_PATH = os.getenv('DB_PATH', 'starwars.db')
+DB_PATH = "advertisements.db"
+SECRET_KEY = "your-secret-key-change-in-production"
+ALGORITHM = "HS256"
+
+async def init_db():
+    """Инициализация SQLite базы данных"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            email TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS advertisements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        ''')
+
+        await db.execute('CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)')
+        await db.execute('CREATE INDEX IF NOT EXISTS idx_ads_user_id ON advertisements(user_id)')
+
+        await db.commit()
+        logger.info(f"SQLite database initialized: {DB_PATH}")
+
+def hash_password(password: str) -> str:
+    """Простое хеширование пароля"""
+    return hashlib.sha256(password.encode()).hexdigest()
 
 
-class Database:
-    """Простой класс для работы с SQLite"""
-
-    @staticmethod
-    async def init_db():
-        """Инициализация базы данных"""
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
-            await db.execute('''
-            CREATE TABLE IF NOT EXISTS characters (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                uid INTEGER UNIQUE NOT NULL,
-                name TEXT NOT NULL,
-                birth_year TEXT,
-                eye_color TEXT,
-                gender TEXT,
-                hair_color TEXT,
-                homeworld TEXT,
-                mass TEXT,
-                skin_color TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP
-            )
-            ''')
+def verify_password(password: str, hashed: str) -> bool:
+    """Проверка пароля"""
+    return hash_password(password) == hashed
 
 
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_name ON characters(name)')
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_gender ON characters(gender)')
-
-            await db.commit()
-            logger.info(f"Database initialized: {DB_PATH}")
-            cursor = await db.execute('SELECT COUNT(*) FROM characters')
-            count = (await cursor.fetchone())[0]
-
-            if count == 0:
-                logger.info("Adding sample data...")
-                sample_data = [
-                    (1, 'Luke Skywalker', '19BBY', 'blue', 'male', 'blond', 'https://swapi.dev/api/planets/1/', '77',
-                     'fair'),
-                    (2, 'C-3PO', '112BBY', 'yellow', 'n/a', 'n/a', 'https://swapi.dev/api/planets/1/', '75', 'gold'),
-                    (3, 'R2-D2', '33BBY', 'red', 'n/a', 'n/a', 'https://swapi.dev/api/planets/8/', '32', 'white, blue'),
-                    (4, 'Darth Vader', '41.9BBY', 'yellow', 'male', 'none', 'https://swapi.dev/api/planets/1/', '136',
-                     'white'),
-                    (5, 'Leia Organa', '19BBY', 'brown', 'female', 'brown', 'https://swapi.dev/api/planets/2/', '49',
-                     'light'),
-                ]
-
-                for data in sample_data:
-                    await db.execute('''
-                    INSERT OR IGNORE INTO characters 
-                    (uid, name, birth_year, eye_color, gender, hair_color, homeworld, mass, skin_color)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', data)
-
-                await db.commit()
-                logger.info(f"Added {len(sample_data)} sample characters")
+def create_token(user_id: int, username: str) -> str:
+    """Создание JWT токена"""
+    payload = {
+        "user_id": user_id,
+        "sub": username,
+        "exp": datetime.utcnow() + timedelta(minutes=30)
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
-class Character:
-    """Модель персонажа"""
-
-    def __init__(self, **kwargs):
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-
-    def to_dict(self):
-        """Преобразование в словарь"""
-        result = {}
-        for key, value in self.__dict__.items():
-            if not key.startswith('_'):
-                if isinstance(value, bytes):
-                    result[key] = value.decode('utf-8')
-                else:
-                    result[key] = value
-        return result
-
-
-class CharacterCRUD:
-    """CRUD операции для персонажей"""
-
-    @staticmethod
-    async def get_all(limit: int = 10, offset: int = 0):
-        """Получить всех персонажей"""
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                'SELECT * FROM characters LIMIT ? OFFSET ?',
-                (limit, offset)
-            )
-            rows = await cursor.fetchall()
-            return [Character(**dict(row)) for row in rows]
-
-    @staticmethod
-    async def get_by_id(char_id: int):
-        """Получить персонажа по ID"""
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                'SELECT * FROM characters WHERE id = ?',
-                (char_id,)
-            )
-            row = await cursor.fetchone()
-            return Character(**dict(row)) if row else None
-
-    @staticmethod
-    async def create(character_data: dict):
-        """Создать нового персонажа"""
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute('''
-            INSERT INTO characters 
-            (uid, name, birth_year, eye_color, gender, hair_color, homeworld, mass, skin_color)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                character_data.get('uid'),
-                character_data.get('name'),
-                character_data.get('birth_year'),
-                character_data.get('eye_color'),
-                character_data.get('gender'),
-                character_data.get('hair_color'),
-                character_data.get('homeworld'),
-                character_data.get('mass'),
-                character_data.get('skin_color')
-            ))
-            await db.commit()
-
-            char_id = cursor.lastrowid
-            return await CharacterCRUD.get_by_id(char_id)
-
-    @staticmethod
-    async def count():
-        """Получить количество персонажей"""
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute('SELECT COUNT(*) FROM characters')
-            result = await cursor.fetchone()
-            return result[0] if result else 0
-
+def verify_token(token: str):
+    """Проверка JWT токена"""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except jwt.PyJWTError:
+        return None
 
 async def health_check(request):
-    """Проверка здоровья API"""
+    """Проверка здоровья"""
     return web.json_response({
-        'status': 'ok',
-        'service': 'Star Wars API',
-        'version': '1.0.0',
-        'endpoints': {
-            'GET /api/health': 'Health check',
-            'GET /api/characters': 'List all characters',
-            'GET /api/characters/{id}': 'Get character by ID',
-            'POST /api/characters': 'Create new character',
-            'GET /api/characters/search?q={query}': 'Search characters',
-            'GET /api/statistics': 'Get statistics'
-        }
+        "status": "ok",
+        "service": "Advertisements API",
+        "version": "1.0.0"
     })
 
 
-async def get_characters(request):
-    """Получить список персонажей"""
-    try:
-        try:
-            limit = min(int(request.query.get('limit', 10)), 100)  # Максимум 100
-            page = max(int(request.query.get('page', 1)), 1)
-        except ValueError:
-            limit = 10
-            page = 1
-
-        offset = (page - 1) * limit
-
-        characters = await CharacterCRUD.get_all(limit=limit, offset=offset)
-        total = await CharacterCRUD.count()
-
-        return web.json_response({
-            'items': [char.to_dict() for char in characters],
-            'total': total,
-            'page': page,
-            'limit': limit,
-            'pages': (total + limit - 1) // limit if limit > 0 else 0
-        })
-
-    except Exception as e:
-        logger.error(f"Error getting characters: {e}")
-        return web.json_response(
-            {'error': 'Internal server error', 'detail': str(e)},
-            status=500
-        )
-
-
-async def get_character(request):
-    """Получить персонажа по ID"""
-    try:
-        char_id = int(request.match_info['id'])
-        character = await CharacterCRUD.get_by_id(char_id)
-
-        if not character:
-            return web.json_response(
-                {'error': 'Character not found'},
-                status=404
-            )
-
-        return web.json_response(character.to_dict())
-
-    except ValueError:
-        return web.json_response(
-            {'error': 'Invalid character ID'},
-            status=400
-        )
-    except Exception as e:
-        logger.error(f"Error getting character: {e}")
-        return web.json_response(
-            {'error': 'Internal server error', 'detail': str(e)},
-            status=500
-        )
-
-
-async def create_character(request):
-    """Создать нового персонажа"""
+async def register(request):
+    """Регистрация"""
     try:
         data = await request.json()
+        username = data.get('username', '').strip()
+        email = data.get('email', '').strip()
+        password = data.get('password', '').strip()
 
-        if not data.get('name') or not data.get('name').strip():
+        if not username or not email or not password:
             return web.json_response(
-                {'error': 'Name is required'},
-                status=400
-            )
-
-        if not data.get('uid'):
-            return web.json_response(
-                {'error': 'UID is required'},
+                {"error": "All fields are required"},
                 status=400
             )
 
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                'SELECT id FROM characters WHERE uid = ?',
-                (data.get('uid'),)
+                "SELECT id FROM users WHERE username = ?",
+                (username,)
             )
             existing = await cursor.fetchone()
             if existing:
                 return web.json_response(
-                    {'error': 'Character with this UID already exists'},
-                    status=409
+                    {"error": "Username already exists"},
+                    status=400
                 )
 
-        character = await CharacterCRUD.create(data)
-
-        return web.json_response(
-            character.to_dict(),
-            status=201
-        )
-
-    except Exception as e:
-        logger.error(f"Error creating character: {e}")
-        return web.json_response(
-            {'error': 'Internal server error', 'detail': str(e)},
-            status=500
-        )
-
-
-async def search_characters(request):
-    """Поиск персонажей по имени"""
-    try:
-        query = request.query.get('q', '').strip()
-        if not query:
-            return web.json_response(
-                {'error': 'Search query is required'},
-                status=400
+            password_hash = hash_password(password)
+            cursor = await db.execute(
+                "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
+                (username, email, password_hash)
             )
+            await db.commit()
+
+            user_id = cursor.lastrowid
+
+            return web.json_response({
+                "id": user_id,
+                "username": username,
+                "email": email
+            }, status=201)
+
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        logger.error(f"Registration error: {e}")
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+async def login(request):
+    """Вход"""
+    try:
+        data = await request.json()
+        username = data.get('username', '').strip()
+        password = data.get('password', '').strip()
 
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                'SELECT * FROM characters WHERE LOWER(name) LIKE ? LIMIT 20',
-                (f'%{query.lower()}%',)
+                "SELECT * FROM users WHERE username = ?",
+                (username,)
             )
-            rows = await cursor.fetchall()
-            characters = [Character(**dict(row)) for row in rows]
+            user = await cursor.fetchone()
 
-        return web.json_response({
-            'results': [char.to_dict() for char in characters],
-            'count': len(characters)
-        })
+            if not user or not verify_password(password, user['password_hash']):
+                return web.json_response(
+                    {"error": "Invalid credentials"},
+                    status=401
+                )
 
+            token = create_token(user['id'], user['username'])
+
+            return web.json_response({
+                "access_token": token,
+                "token_type": "bearer"
+            })
+
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
     except Exception as e:
-        logger.error(f"Error searching characters: {e}")
-        return web.json_response(
-            {'error': 'Internal server error', 'detail': str(e)},
-            status=500
-        )
+        logger.error(f"Login error: {e}")
+        return web.json_response({"error": "Internal server error"}, status=500)
 
 
-async def get_statistics(request):
-    """Получить статистику"""
+async def get_ads(request):
+    """Получить объявления"""
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute('SELECT COUNT(*) FROM characters')
+
+            page = int(request.query.get('page', 1))
+            limit = int(request.query.get('limit', 10))
+            offset = (page - 1) * limit
+            cursor = await db.execute('''
+                SELECT a.*, u.username 
+                FROM advertisements a
+                LEFT JOIN users u ON a.user_id = u.id
+                ORDER BY a.created_at DESC
+                LIMIT ? OFFSET ?
+            ''', (limit, offset))
+
+            rows = await cursor.fetchall()
+            ads = [dict(row) for row in rows]
+            cursor = await db.execute("SELECT COUNT(*) FROM advertisements")
             total = (await cursor.fetchone())[0]
 
-            cursor = await db.execute('''
-                SELECT gender, COUNT(*) as count 
-                FROM characters 
-                GROUP BY gender 
-                ORDER BY count DESC
-            ''')
-
-            gender_stats = {}
-            rows = await cursor.fetchall()
-            for row in rows:
-                gender = row['gender'] if row['gender'] else 'unknown'
-                gender_stats[gender] = row['count']
-
-        return web.json_response({
-            'total': total,
-            'by_gender': gender_stats
-        })
+            return web.json_response({
+                "items": ads,
+                "total": total,
+                "page": page,
+                "limit": limit,
+                "pages": (total + limit - 1) // limit if limit > 0 else 0
+            })
 
     except Exception as e:
-        logger.error(f"Error getting statistics: {e}")
-        return web.json_response(
-            {'error': 'Internal server error', 'detail': str(e)},
-            status=500
-        )
+        logger.error(f"Error getting ads: {e}")
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+async def create_ad(request):
+    """Создать объявление"""
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header:
+            return web.json_response({"error": "Authentication required"}, status=401)
+
+        token = auth_header.replace('Bearer ', '').strip()
+        payload = verify_token(token)
+        if not payload:
+            return web.json_response({"error": "Invalid token"}, status=401)
+
+        user_id = payload.get('user_id')
+
+        data = await request.json()
+        title = data.get('title', '').strip()
+        description = data.get('description', '').strip()
+
+        if not title or not description:
+            return web.json_response({"error": "Title and description are required"}, status=400)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "INSERT INTO advertisements (title, description, user_id) VALUES (?, ?, ?)",
+                (title, description, user_id)
+            )
+            await db.commit()
+
+            ad_id = cursor.lastrowid
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT a.*, u.username 
+                FROM advertisements a
+                LEFT JOIN users u ON a.user_id = u.id
+                WHERE a.id = ?
+            ''', (ad_id,))
+
+            ad = await cursor.fetchone()
+
+            return web.json_response(dict(ad), status=201)
+
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    except Exception as e:
+        logger.error(f"Error creating ad: {e}")
+        return web.json_response({"error": "Internal server error"}, status=500)
 
 
 def create_app():
     """Создание приложения"""
     app = web.Application()
-
     app.router.add_get('/api/health', health_check)
-    app.router.add_get('/api/characters', get_characters)
-    app.router.add_get(r'/api/characters/{id:\d+}', get_character)
-    app.router.add_post('/api/characters', create_character)
-    app.router.add_get('/api/characters/search', search_characters)
-    app.router.add_get('/api/statistics', get_statistics)
+    app.router.add_get('/api/ads', get_ads)
+    app.router.add_post('/api/register', register)
+    app.router.add_post('/api/login', login)
+    app.router.add_post('/api/ads', create_ad)
 
     @web.middleware
     async def cors_middleware(request, handler):
-        if request.method == 'OPTIONS':
-            response = web.Response()
-        else:
-            response = await handler(request)
-
+        response = await handler(request)
         response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
         return response
 
     app.middlewares.append(cors_middleware)
 
-    async def options_handler(request):
-        return web.Response()
-
-    app.router.add_route('OPTIONS', '/api/{tail:.*}', options_handler)
-
-    @web.middleware
-    async def log_middleware(request, handler):
-        logger.info(f"{request.method} {request.path}")
-        try:
-            response = await handler(request)
-            logger.info(f"{request.method} {request.path} - {response.status}")
-            return response
-        except Exception as e:
-            logger.error(f"Error in {request.method} {request.path}: {e}")
-            raise
-
-    app.middlewares.append(log_middleware)
-
     return app
 
 
-async def start_server():
-    """Запуск сервера"""
-    await Database.init_db()
+async def main():
+    """Основная функция"""
+    await init_db()
 
     app = create_app()
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, HOST, PORT)
 
-    logger.info(f" Star Wars API запущен!")
-    logger.info(f" Адрес: http://{HOST}:{PORT}")
-    logger.info(f" Доступные эндпоинты:")
-    logger.info(f"   GET  /api/health                - Проверка здоровья")
-    logger.info(f"   GET  /api/characters            - Список персонажей")
-    logger.info(f"   GET  /api/characters/{{id}}       - Персонаж по ID")
-    logger.info(f"   POST /api/characters            - Создать персонажа")
-    logger.info(f"   GET  /api/characters/search?q=  - Поиск персонажей")
-    logger.info(f"   GET  /api/statistics            - Статистика")
-    logger.info("")
-    logger.info(" Примеры запросов:")
-    logger.info("   curl http://localhost:8000/api/characters")
-    logger.info("   curl http://localhost:8000/api/characters/1")
-    logger.info(
-        "   curl -X POST http://localhost:8000/api/characters -H 'Content-Type: application/json' -d '{\"uid\": 100, \"name\": \"Yoda\"}'")
+    site = web.TCPSite(runner, '0.0.0.0', 8000)
+
+    logger.info(" Advertisements API запущен!")
+    logger.info(" Адрес: http://localhost:8000")
+    logger.info(" Эндпоинты:")
+    logger.info("   GET  /api/health   - Проверка здоровья")
+    logger.info("   POST /api/register - Регистрация")
+    logger.info("   POST /api/login    - Вход")
+    logger.info("   GET  /api/ads      - Получить объявления")
+    logger.info("   POST /api/ads      - Создать объявление (требуется токен)")
 
     await site.start()
 
     try:
         await asyncio.Event().wait()
     except KeyboardInterrupt:
-        logger.info("Сервер остановлен пользователем")
+        logger.info("Сервер остановлен")
     finally:
         await runner.cleanup()
 
 
-def main():
-    """Точка входа"""
+if __name__ == '__main__':
     try:
-        asyncio.run(start_server())
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Сервер остановлен пользователем")
-    except Exception as e:
-        logger.error(f"Ошибка при запуске сервера: {e}")
-    finally:
-        logger.info("Сервер завершил работу")
-
-
-if __name__ == '__main__':
-    main()

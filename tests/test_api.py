@@ -1,111 +1,89 @@
-"""
-Тестирование API
-"""
-import requests
+import pytest
+import asyncio
+import aiohttp
 import json
 
-BASE_URL = "http://localhost:8000/api"
 
-
-def test_health():
+async def test_health_check():
     """Тест проверки здоровья"""
-    print(" Тестирую /health...")
-    response = requests.get(f"{BASE_URL}/health")
-    print(f"   Status: {response.status_code}")
-    print(f"   Response: {response.json()}")
-    print()
+    async with aiohttp.ClientSession() as session:
+        async with session.get('http://localhost:8000/api/health') as response:
+            assert response.status == 200
+            data = await response.json()
+            assert data['status'] == 'ok'
 
 
-def test_get_characters():
-    """Тест получения персонажей"""
-    print(" Тестирую GET /characters...")
-    response = requests.get(f"{BASE_URL}/characters")
-    print(f"   Status: {response.status_code}")
-    data = response.json()
-    print(f"   Total characters: {data['total']}")
-    print(f"   Page: {data['page']}")
-    print(f"   Items on page: {len(data['items'])}")
-    print()
+async def test_register_and_login():
+    """Тест регистрации и входа"""
+    async with aiohttp.ClientSession() as session:
+        user_data = {
+            'username': 'testuser2',
+            'email': 'test2@example.com',
+            'password': 'test123'
+        }
+
+        async with session.post('http://localhost:8000/api/register',
+                                json=user_data) as response:
+            assert response.status == 201
+            data = await response.json()
+            assert data['username'] == 'testuser2'
+
+        async with session.post('http://localhost:8000/api/login',
+                                json={'username': 'testuser2', 'password': 'test123'}) as response:
+            assert response.status == 200
+            data = await response.json()
+            assert 'access_token' in data
+            return data['access_token']
 
 
-def test_get_character():
-    """Тест получения конкретного персонажа"""
-    print(" Тестирую GET /characters/1...")
-    response = requests.get(f"{BASE_URL}/characters/1")
-    print(f"   Status: {response.status_code}")
-    if response.status_code == 200:
-        character = response.json()
-        print(f"   Character: {character['name']}")
-        print(f"   Gender: {character['gender']}")
-    print()
+async def test_create_ad_with_auth():
+    """Тест создания объявления с аутентификацией"""
+    token = await test_register_and_login()
+
+    async with aiohttp.ClientSession() as session:
+        headers = {'Authorization': f'Bearer {token}'}
+
+        ad_data = {
+            'title': 'Test Advertisement',
+            'description': 'This is a test advertisement'
+        }
+
+        async with session.post('http://localhost:8000/api/ads',
+                                json=ad_data,
+                                headers=headers) as response:
+            assert response.status == 201
+            data = await response.json()
+            assert data['title'] == 'Test Advertisement'
 
 
-def test_create_character():
-    """Тест создания персонажа"""
-    print(" Тестирую POST /characters...")
-    new_character = {
-        "uid": 999,
-        "name": "Test Character",
-        "gender": "male",
-        "birth_year": "100BBY",
-        "eye_color": "green"
-    }
-
-    response = requests.post(
-        f"{BASE_URL}/characters",
-        json=new_character,
-        headers={"Content-Type": "application/json"}
-    )
-
-    print(f"   Status: {response.status_code}")
-    if response.status_code == 201:
-        print(f"   Created character: {response.json()['name']}")
-    print()
+async def test_get_ads():
+    """Тест получения объявлений"""
+    async with aiohttp.ClientSession() as session:
+        async with session.get('http://localhost:8000/api/ads') as response:
+            assert response.status == 200
+            data = await response.json()
+            assert 'items' in data
+            assert 'total' in data
 
 
-def test_search():
-    """Тест поиска"""
-    print(" Тестирую поиск...")
-    response = requests.get(f"{BASE_URL}/characters/search?q=Luke")
-    print(f"   Status: {response.status_code}")
-    data = response.json()
-    print(f"   Found: {data['count']} characters")
-    print()
+async def run_all_tests():
+    """Запуск всех тестов"""
+    print("Запуск тестов Advertisements API...")
+
+    tests = [
+        test_health_check,
+        test_register_and_login,
+        test_create_ad_with_auth,
+        test_get_ads
+    ]
+
+    for test in tests:
+        try:
+            await test()
+            print(f" {test.__name__}")
+        except Exception as e:
+            print(f" {test.__name__}: {e}")
 
 
-def test_statistics():
-    """Тест статистики"""
-    print(" Тестирую статистику...")
-    response = requests.get(f"{BASE_URL}/statistics")
-    print(f"   Status: {response.status_code}")
-    stats = response.json()
-    print(f"   Total: {stats['total']}")
-    print(f"   By gender: {stats['by_gender']}")
-    print()
-
-
-def main():
-    """Основная функция тестирования"""
-    print("=" * 50)
-    print(" ТЕСТИРОВАНИЕ STAR WARS API")
-    print("=" * 50)
-
-    try:
-        test_health()
-        test_get_characters()
-        test_get_character()
-        test_create_character()
-        test_search()
-        test_statistics()
-
-        print(" Все тесты завершены!")
-
-    except requests.exceptions.ConnectionError:
-        print(" Не удалось подключиться к серверу")
-        print(" Убедитесь что сервер запущен: python run.py")
-    except Exception as e:
-        print(f" Ошибка: {e}")
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    asyncio.run(run_all_tests())

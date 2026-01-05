@@ -1,162 +1,294 @@
-from typing import Optional, List, Dict, Any
-from datetime import datetime
-from app.database import Database
-from app.models import Character
-from app.schemas import CharacterCreate, CharacterUpdate
+"""
+CRUD операции для пользователей и объявлений
+"""
 import logging
+from typing import Optional, List
+from app.database import Database
+from app.models import User, Advertisement
+from app.security import get_password_hash, verify_password
 
 logger = logging.getLogger(__name__)
 
 
-class CharacterCRUD:
-    """CRUD операции для персонажей"""
+class UserCRUD:
+    """CRUD операции для пользователей"""
+
+    @staticmethod
+    async def get_by_id(user_id: int) -> Optional[User]:
+        """Получить пользователя по ID"""
+        row = await Database.fetchrow(
+            "SELECT * FROM users WHERE id = $1",
+            user_id
+        )
+        return User.from_dict(row) if row else None
+
+    @staticmethod
+    async def get_by_username(username: str) -> Optional[User]:
+        """Получить пользователя по имени"""
+        row = await Database.fetchrow(
+            "SELECT * FROM users WHERE username = $1",
+            username
+        )
+        return User.from_dict(row) if row else None
+
+    @staticmethod
+    async def get_by_email(email: str) -> Optional[User]:
+        """Получить пользователя по email"""
+        row = await Database.fetchrow(
+            "SELECT * FROM users WHERE email = $1",
+            email
+        )
+        return User.from_dict(row) if row else None
+
+    @staticmethod
+    async def create(user_data: dict) -> User:
+        """Создать нового пользователя"""
+        password_hash = get_password_hash(user_data["password"])
+
+        row = await Database.fetchrow(
+            """
+            INSERT INTO users (username, email, password_hash)
+            VALUES ($1, $2, $3)
+            RETURNING *
+            """,
+            user_data["username"],
+            user_data["email"],
+            password_hash
+        )
+
+        return User.from_dict(row)
+
+    @staticmethod
+    async def update(user_id: int, user_data: dict) -> Optional[User]:
+        """Обновить пользователя"""
+        update_fields = []
+        values = []
+        i = 1
+
+        if "username" in user_data:
+            update_fields.append(f"username = ${i}")
+            values.append(user_data["username"])
+            i += 1
+
+        if "email" in user_data:
+            update_fields.append(f"email = ${i}")
+            values.append(user_data["email"])
+            i += 1
+
+        if "password" in user_data:
+            update_fields.append(f"password_hash = ${i}")
+            values.append(get_password_hash(user_data["password"]))
+            i += 1
+
+        if not update_fields:
+            return await UserCRUD.get_by_id(user_id)
+
+        update_fields.append(f"updated_at = CURRENT_TIMESTAMP")
+        values.append(user_id)
+
+        query = f"""
+        UPDATE users 
+        SET {', '.join(update_fields)}
+        WHERE id = ${i}
+        RETURNING *
+        """
+
+        row = await Database.fetchrow(query, *values)
+        return User.from_dict(row) if row else None
+
+    @staticmethod
+    async def authenticate(username: str, password: str) -> Optional[User]:
+        """Аутентификация пользователя"""
+        user = await UserCRUD.get_by_username(username)
+        if not user:
+            return None
+
+        if not verify_password(password, user.password_hash):
+            return None
+
+        return user
+
+    @staticmethod
+    async def get_all(limit: int = 100, offset: int = 0) -> List[User]:
+        """Получить всех пользователей (для админки)"""
+        rows = await Database.fetch(
+            "SELECT * FROM users ORDER BY id LIMIT $1 OFFSET $2",
+            limit, offset
+        )
+        return [User.from_dict(row) for row in rows]
+
+    @staticmethod
+    async def count() -> int:
+        """Посчитать количество пользователей"""
+        count = await Database.fetchval("SELECT COUNT(*) FROM users")
+        return count if count else 0
+
+
+class AdvertisementCRUD:
+    """CRUD операции для объявлений"""
 
     @staticmethod
     async def get_all(
             skip: int = 0,
             limit: int = 100,
-            filters: Optional[Dict[str, Any]] = None
-    ) -> List[Character]:
-        """Получить всех персонажей с пагинацией и фильтрацией"""
-        query = "SELECT * FROM characters WHERE 1=1"
+            user_id: Optional[int] = None,
+            search: Optional[str] = None
+    ) -> List[Advertisement]:
+        """Получить все объявления"""
+        query = """
+        SELECT a.*, u.id as u_id, u.username, u.email, u.created_at as u_created_at, u.updated_at as u_updated_at
+        FROM advertisements a
+        LEFT JOIN users u ON a.user_id = u.id
+        WHERE 1=1
+        """
+
         params = []
+        i = 1
 
-        if filters:
-            if filters.get('name'):
-                query += " AND name ILIKE $1"
-                params.append(f"%{filters['name']}%")
-            if filters.get('gender'):
-                query += " AND gender = $2"
-                params.append(filters['gender'])
-            if filters.get('homeworld'):
-                query += " AND homeworld LIKE $3"
-                params.append(f"%{filters['homeworld']}%")
+        if user_id:
+            query += f" AND a.user_id = ${i}"
+            params.append(user_id)
+            i += 1
 
-        query += " ORDER BY id LIMIT $4 OFFSET $5"
+        if search:
+            query += f" AND (a.title ILIKE ${i} OR a.description ILIKE ${i})"
+            params.append(f"%{search}%")
+            i += 1
+
+        query += f" ORDER BY a.created_at DESC LIMIT ${i} OFFSET ${i + 1}"
         params.extend([limit, skip])
 
         rows = await Database.fetch(query, *params)
-        return [Character.from_dict(dict(row)) for row in rows]
+
+        advertisements = []
+        for row in rows:
+            user_data = {
+                'id': row['u_id'],
+                'username': row['username'],
+                'email': row['email'],
+                'created_at': row['u_created_at'],
+                'updated_at': row['u_updated_at']
+            } if row['u_id'] else None
+
+            ad_data = dict(row)
+            ad_data['user'] = user_data
+            advertisements.append(Advertisement.from_dict(ad_data))
+
+        return advertisements
 
     @staticmethod
-    async def get_by_id(character_id: int) -> Optional[Character]:
-        """Получить персонажа по ID"""
+    async def get_by_id(ad_id: int) -> Optional[Advertisement]:
+        """Получить объявление по ID"""
         row = await Database.fetchrow(
-            "SELECT * FROM characters WHERE id = $1",
-            character_id
+            """
+            SELECT a.*, u.id as u_id, u.username, u.email, u.created_at as u_created_at, u.updated_at as u_updated_at
+            FROM advertisements a
+            LEFT JOIN users u ON a.user_id = u.id
+            WHERE a.id = $1
+            """,
+            ad_id
         )
-        return Character.from_dict(dict(row)) if row else None
+
+        if not row:
+            return None
+
+        user_data = {
+            'id': row['u_id'],
+            'username': row['username'],
+            'email': row['email'],
+            'created_at': row['u_created_at'],
+            'updated_at': row['u_updated_at']
+        } if row['u_id'] else None
+
+        ad_data = dict(row)
+        ad_data['user'] = user_data
+
+        return Advertisement.from_dict(ad_data)
 
     @staticmethod
-    async def get_by_uid(uid: int) -> Optional[Character]:
-        """Получить персонажа по UID (из SWAPI)"""
+    async def create(ad_data: dict, user_id: int) -> Advertisement:
+        """Создать новое объявление"""
         row = await Database.fetchrow(
-            "SELECT * FROM characters WHERE uid = $1",
-            uid
+            """
+            INSERT INTO advertisements (title, description, user_id)
+            VALUES ($1, $2, $3)
+            RETURNING *
+            """,
+            ad_data["title"],
+            ad_data["description"],
+            user_id
         )
-        return Character.from_dict(dict(row)) if row else None
+
+        return await AdvertisementCRUD.get_by_id(row['id'])
 
     @staticmethod
-    async def create(character: CharacterCreate) -> Character:
-        """Создать нового персонажа"""
-        now = datetime.utcnow()
-        query = """
-        INSERT INTO characters 
-        (uid, name, birth_year, eye_color, gender, hair_color, homeworld, mass, skin_color, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    async def update(ad_id: int, ad_data: dict, user_id: int) -> Optional[Advertisement]:
+        """Обновить объявление (только автор)"""
+        ad = await AdvertisementCRUD.get_by_id(ad_id)
+        if not ad or ad.user_id != user_id:
+            return None
+
+        update_fields = []
+        values = []
+        i = 1
+
+        if "title" in ad_data:
+            update_fields.append(f"title = ${i}")
+            values.append(ad_data["title"])
+            i += 1
+
+        if "description" in ad_data:
+            update_fields.append(f"description = ${i}")
+            values.append(ad_data["description"])
+            i += 1
+
+        if not update_fields:
+            return ad
+
+        update_fields.append(f"updated_at = CURRENT_TIMESTAMP")
+
+        values.extend([ad_id, user_id])
+
+        query = f"""
+        UPDATE advertisements 
+        SET {', '.join(update_fields)}
+        WHERE id = ${i} AND user_id = ${i + 1}
         RETURNING *
         """
 
-        row = await Database.fetchrow(
-            query,
-            character.uid,
-            character.name,
-            character.birth_year,
-            character.eye_color,
-            character.gender,
-            character.hair_color,
-            character.homeworld,
-            character.mass,
-            character.skin_color,
-            now
-        )
+        row = await Database.fetchrow(query, *values)
+        if row:
+            return await AdvertisementCRUD.get_by_id(ad_id)
 
-        return Character.from_dict(dict(row))
+        return None
 
     @staticmethod
-    async def update(character_id: int, character: CharacterUpdate) -> Optional[Character]:
-        """Обновить существующего персонажа"""
-        current = await CharacterCRUD.get_by_id(character_id)
-        if not current:
-            return None
-
-        update_data = character.dict(exclude_unset=True)
-        if not update_data:
-            return current
-
-        update_data['updated_at'] = datetime.utcnow()
-
-        set_clause = ", ".join([f"{key} = ${i + 2}" for i, key in enumerate(update_data.keys())])
-        query = f"UPDATE characters SET {set_clause}, updated_at = ${len(update_data) + 2} WHERE id = $1 RETURNING *"
-
-        params = [character_id] + list(update_data.values()) + [update_data['updated_at']]
-        row = await Database.fetchrow(query, *params)
-
-        return Character.from_dict(dict(row)) if row else None
-
-    @staticmethod
-    async def delete(character_id: int) -> bool:
-        """Удалить персонажа"""
+    async def delete(ad_id: int, user_id: int) -> bool:
+        """Удалить объявление (только автор)"""
         result = await Database.execute(
-            "DELETE FROM characters WHERE id = $1",
-            character_id
+            "DELETE FROM advertisements WHERE id = $1 AND user_id = $2",
+            ad_id, user_id
         )
         return "DELETE 1" in result
 
     @staticmethod
-    async def count(filters: Optional[Dict[str, Any]] = None) -> int:
-        """Посчитать общее количество персонажей"""
-        query = "SELECT COUNT(*) FROM characters WHERE 1=1"
+    async def count(
+            user_id: Optional[int] = None,
+            search: Optional[str] = None
+    ) -> int:
+        """Посчитать количество объявлений"""
+        query = "SELECT COUNT(*) FROM advertisements WHERE 1=1"
         params = []
+        i = 1
 
-        if filters:
-            if filters.get('name'):
-                query += " AND name ILIKE $1"
-                params.append(f"%{filters['name']}%")
-            if filters.get('gender'):
-                query += " AND gender = $2"
-                params.append(filters['gender'])
+        if user_id:
+            query += f" AND user_id = ${i}"
+            params.append(user_id)
+            i += 1
+
+        if search:
+            query += f" AND (title ILIKE ${i} OR description ILIKE ${i})"
+            params.append(f"%{search}%")
 
         count = await Database.fetchval(query, *params)
         return count if count else 0
-
-    @staticmethod
-    async def get_statistics() -> Dict[str, Any]:
-        """Получить статистику по персонажам"""
-        stats = {}
-
-        stats['total'] = await CharacterCRUD.count()
-
-        gender_stats = await Database.fetch("""
-            SELECT gender, COUNT(*) as count 
-            FROM characters 
-            GROUP BY gender 
-            ORDER BY count DESC
-        """)
-        stats['by_gender'] = {row['gender'] or 'unknown': row['count'] for row in gender_stats}
-        planet_stats = await Database.fetch("""
-            SELECT 
-                CASE 
-                    WHEN homeworld LIKE '%planets/%' THEN 
-                        SUBSTRING(homeworld FROM 'planets/(\d+)')
-                    ELSE 'unknown'
-                END as planet_id,
-                COUNT(*) as count
-            FROM characters 
-            GROUP BY planet_id 
-            ORDER BY count DESC 
-            LIMIT 5
-        """)
-        stats['top_planets'] = {row['planet_id']: row['count'] for row in planet_stats}
-
-        return stats

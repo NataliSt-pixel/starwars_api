@@ -1,7 +1,10 @@
 import asyncpg
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import logging
-from config import config
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -17,11 +20,14 @@ class Database:
         if cls._pool is None:
             try:
                 cls._pool = await asyncpg.create_pool(
-                    dsn=config.db.async_url.replace("postgresql+asyncpg://", ""),
+                    host=os.getenv("DB_HOST", "localhost"),
+                    port=int(os.getenv("DB_PORT", 5432)),
+                    database=os.getenv("DB_NAME", "advertisements_db"),
+                    user=os.getenv("DB_USER", "postgres"),
+                    password=os.getenv("DB_PASSWORD", ""),
                     min_size=5,
                     max_size=20,
-                    command_timeout=60,
-                    server_settings={"application_name": "starwars_api"}
+                    command_timeout=60
                 )
                 logger.info("Database connection pool created")
             except Exception as e:
@@ -45,21 +51,23 @@ class Database:
             return await conn.execute(query, *args)
 
     @classmethod
-    async def fetch(cls, query: str, *args) -> list:
+    async def fetch(cls, query: str, *args) -> List[Dict[str, Any]]:
         """Выполнить запрос с возвратом нескольких строк"""
         pool = await cls.get_pool()
         async with pool.acquire() as conn:
-            return await conn.fetch(query, *args)
+            rows = await conn.fetch(query, *args)
+            return [dict(row) for row in rows]
 
     @classmethod
-    async def fetchrow(cls, query: str, *args) -> Optional[dict]:
+    async def fetchrow(cls, query: str, *args) -> Optional[Dict[str, Any]]:
         """Выполнить запрос с возвратом одной строки"""
         pool = await cls.get_pool()
         async with pool.acquire() as conn:
-            return await conn.fetchrow(query, *args)
+            row = await conn.fetchrow(query, *args)
+            return dict(row) if row else None
 
     @classmethod
-    async def fetchval(cls, query: str, *args) -> Optional[any]:
+    async def fetchval(cls, query: str, *args) -> Optional[Any]:
         """Выполнить запрос с возвратом одного значения"""
         pool = await cls.get_pool()
         async with pool.acquire() as conn:

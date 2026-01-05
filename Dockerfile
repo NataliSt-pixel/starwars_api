@@ -12,8 +12,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN useradd -m -u 1000 api_user && chown -R api_user:api_user /app
-USER api_user
+RUN useradd -m -u 1000 app_user && chown -R app_user:app_user /app
+USER app_user
 
 EXPOSE 8000
 

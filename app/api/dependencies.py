@@ -1,10 +1,11 @@
 from aiohttp import web
+from typing import Optional
 import json
-from typing import Dict, Any
-from app.schemas import PaginationParams
+from app.security import get_current_user_from_token
+from app.schemas import PaginationParams, AdvertisementFilterParams
 
 
-async def validate_json(request: web.Request) -> Dict[str, Any]:
+async def validate_json(request: web.Request) -> dict:
     """Валидация JSON тела запроса"""
     try:
         data = await request.json()
@@ -32,3 +33,34 @@ def get_pagination_params(request: web.Request) -> PaginationParams:
 
     except ValueError:
         return PaginationParams()
+
+
+def get_filter_params(request: web.Request) -> AdvertisementFilterParams:
+    """Получение параметров фильтрации из запроса"""
+    user_id = request.query.get('user_id')
+    search = request.query.get('search')
+
+    if user_id:
+        try:
+            user_id = int(user_id)
+        except ValueError:
+            user_id = None
+
+    return AdvertisementFilterParams(user_id=user_id, search=search)
+
+
+def get_current_user(request: web.Request) -> Optional[dict]:
+    """Получение текущего пользователя из заголовка Authorization"""
+    auth_header = request.headers.get('Authorization')
+
+    if not auth_header:
+        return None
+
+    try:
+        scheme, token = auth_header.split()
+        if scheme.lower() != 'bearer':
+            return None
+    except ValueError:
+        return None
+
+    return get_current_user_from_token(token)

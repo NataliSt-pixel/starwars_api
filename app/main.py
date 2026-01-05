@@ -1,18 +1,22 @@
 from aiohttp import web
 import logging
 from aiohttp_cors import CorsConfig, ResourceOptions, setup as setup_cors
-from app.database import Database
-from app.api.endpoints import (
-    health_check, get_characters, get_character,
-    create_character, update_character, delete_character,
-    get_statistics, search_characters
-)
-from config import config
 import asyncio
 import os
+from dotenv import load_dotenv
+
+from app.database import Database
+from app.api.endpoints import (
+    health_check, api_docs,
+    register, login, get_current_user_info, update_current_user,
+    get_advertisements, get_advertisement, create_advertisement,
+    update_advertisement, delete_advertisement, get_user_advertisements
+)
+
+load_dotenv()
 
 logging.basicConfig(
-    level=getattr(logging, config.log_level.upper()),
+    level=os.getenv('LOG_LEVEL', 'INFO'),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
@@ -23,10 +27,73 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def create_app() -> web.Application:
-    """Создание приложения aiohttp"""
-    app = web.Application()
+async def init_db():
+    """Инициализация базы данных"""
+    try:
+        init_sql = '''
+        -- Таблица пользователей
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(50) UNIQUE NOT NULL,
+            email VARCHAR(100) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP
+        );
 
+        -- Таблица объявлений
+        CREATE TABLE IF NOT EXISTS advertisements (
+            id SERIAL PRIMARY KEY,
+            title VARCHAR(100) NOT NULL,
+            description TEXT NOT NULL,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP
+        );
+
+        -- Индексы
+        CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+        CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+        CREATE INDEX IF NOT EXISTS idx_ads_user_id ON advertisements(user_id);
+        CREATE INDEX IF NOT EXISTS idx_ads_created_at ON advertisements(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ads_title ON advertisements(title);
+        CREATE INDEX IF NOT EXISTS idx_ads_description ON advertisements(description);
+        '''
+
+        await Database.execute(init_sql)
+        logger.info("Database tables created")
+
+        user_count = await Database.fetchval("SELECT COUNT(*) FROM users")
+        logger.info(f"Users in database: {user_count}")
+
+        if user_count == 0:
+            from app.security import get_password_hash
+
+            test_password = get_password_hash("test123")
+            await Database.execute(
+                "INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3)",
+                "testuser", "test@example.com", test_password
+            )
+            logger.info("Test user created: testuser / test123")
+
+            await Database.execute(
+                "INSERT INTO advertisements (title, description, user_id) VALUES ($1, $2, 1)",
+                "Продам велосипед", "Отличный горный велосипед, почти новый"
+            )
+            await Database.execute(
+                "INSERT INTO advertisements (title, description, user_id) VALUES ($1, $2, 1)",
+                "Ищу работу Python разработчиком", "Опыт 2 года, ищу удаленную работу"
+            )
+            logger.info("Test advertisements created")
+
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        raise
+
+
+def create_app():
+    """Создание приложения"""
+    app = web.Application()
     cors_config = CorsConfig(defaults={
         "*": ResourceOptions(
             allow_credentials=True,
@@ -36,54 +103,24 @@ def create_app() -> web.Application:
         )
     })
     cors = setup_cors(app, defaults=cors_config.defaults)
-
-    app.router.add_get('/api/health', health_check, name='health_check')
-
-    app.router.add_get('/api/characters', get_characters, name='get_characters')
-    app.router.add_get(r'/api/characters/{id:\d+}', get_character, name='get_character')
-    app.router.add_post('/api/characters', create_character, name='create_character')
-    app.router.add_put(r'/api/characters/{id:\d+}', update_character, name='update_character')
-    app.router.add_delete(r'/api/characters/{id:\d+}', delete_character, name='delete_character')
-
-    app.router.add_get('/api/characters/search', search_characters, name='search_characters')
-    app.router.add_get('/api/statistics', get_statistics, name='get_statistics')
-
-    app.router.add_get('/api/docs', lambda request: web.Response(
-        text='''
-        <html>
-            <head><title>Star Wars API Documentation</title></head>
-            <body>
-                <h1>Star Wars API v1.0.0</h1>
-                <h2>Endpoints:</h2>
-                <ul>
-                    <li><strong>GET /api/health</strong> - Health check</li>
-                    <li><strong>GET /api/characters</strong> - Get all characters (with pagination)</li>
-                    <li><strong>GET /api/characters/{id}</strong> - Get character by ID</li>
-                    <li><strong>POST /api/characters</strong> - Create new character</li>
-                    <li><strong>PUT /api/characters/{id}</strong> - Update character</li>
-                    <li><strong>DELETE /api/characters/{id}</strong> - Delete character</li>
-                    <li><strong>GET /api/characters/search?q=name</strong> - Search characters</li>
-                    <li><strong>GET /api/statistics</strong> - Get statistics</li>
-                </ul>
-                <h2>Query Parameters:</h2>
-                <ul>
-                    <li><strong>page</strong> - Page number (default: 1)</li>
-                    <li><strong>size</strong> - Page size (default: 10, max: 100)</li>
-                    <li><strong>name</strong> - Filter by name (partial match)</li>
-                    <li><strong>gender</strong> - Filter by gender</li>
-                    <li><strong>homeworld</strong> - Filter by homeworld</li>
-                </ul>
-            </body>
-        </html>
-        ''',
-        content_type='text/html'
-    ))
+    app.router.add_post('/api/register', register)
+    app.router.add_post('/api/login', login)
+    app.router.add_get('/api/users/me', get_current_user_info)
+    app.router.add_put('/api/users/me', update_current_user)
+    app.router.add_get('/api/ads', get_advertisements)
+    app.router.add_get(r'/api/ads/{id:\d+}', get_advertisement)
+    app.router.add_get(r'/api/users/{user_id:\d+}/ads', get_user_advertisements)
+    app.router.add_post('/api/ads', create_advertisement)
+    app.router.add_put(r'/api/ads/{id:\d+}', update_advertisement)
+    app.router.add_delete(r'/api/ads/{id:\d+}', delete_advertisement)
+    app.router.add_get('/api/health', health_check)
+    app.router.add_get('/api/docs', api_docs)
 
     for route in list(app.router.routes()):
         cors.add(route)
 
     @web.middleware
-    async def log_middleware(request: web.Request, handler):
+    async def log_middleware(request, handler):
         logger.info(f"{request.method} {request.path}")
         try:
             response = await handler(request)
@@ -99,7 +136,7 @@ def create_app() -> web.Application:
     app.middlewares.append(log_middleware)
 
     @web.middleware
-    async def error_middleware(request: web.Request, handler):
+    async def error_middleware(request, handler):
         try:
             return await handler(request)
         except web.HTTPException as ex:
@@ -119,104 +156,56 @@ def create_app() -> web.Application:
     return app
 
 
-async def init_db():
-    """Инициализация базы данных"""
-    try:
-        init_sql = '''
-        CREATE TABLE IF NOT EXISTS characters (
-            id SERIAL PRIMARY KEY,
-            uid INTEGER UNIQUE NOT NULL,
-            name VARCHAR(100) NOT NULL,
-            birth_year VARCHAR(20),
-            eye_color VARCHAR(50),
-            gender VARCHAR(50),
-            hair_color VARCHAR(50),
-            homeworld VARCHAR(255),
-            mass VARCHAR(20),
-            skin_color VARCHAR(50),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_characters_name ON characters(name);
-        CREATE INDEX IF NOT EXISTS idx_characters_gender ON characters(gender);
-        CREATE INDEX IF NOT EXISTS idx_characters_homeworld ON characters(homeworld);
-        CREATE INDEX IF NOT EXISTS idx_characters_uid ON characters(uid);
-        '''
-
-        await Database.execute(init_sql)
-        logger.info("Database initialized successfully")
-
-        count = await Database.fetchval("SELECT COUNT(*) FROM characters")
-        if count == 0:
-            logger.info("Adding sample data...")
-            sample_characters = [
-                (1, "Luke Skywalker", "19BBY", "blue", "male", "blond", "https://www.swapi.tech/api/planets/1", "77",
-                 "fair"),
-                (2, "C-3PO", "112BBY", "yellow", "n/a", "n/a", "https://www.swapi.tech/api/planets/1", "75", "gold"),
-                (3, "R2-D2", "33BBY", "red", "n/a", "n/a", "https://www.swapi.tech/api/planets/8", "32", "white, blue"),
-                (4, "Darth Vader", "41.9BBY", "yellow", "male", "none", "https://www.swapi.tech/api/planets/1", "136",
-                 "white"),
-                (5, "Leia Organa", "19BBY", "brown", "female", "brown", "https://www.swapi.tech/api/planets/2", "49",
-                 "light")
-            ]
-
-            for uid, name, birth_year, eye_color, gender, hair_color, homeworld, mass, skin_color in sample_characters:
-                await Database.execute(
-                    "INSERT INTO characters (uid, name, birth_year, eye_color, gender, hair_color, homeworld, mass, skin_color) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) "
-                    "ON CONFLICT (uid) DO NOTHING",
-                    uid, name, birth_year, eye_color, gender, hair_color, homeworld, mass, skin_color
-                )
-
-            logger.info(f"Added {len(sample_characters)} sample characters")
-
-    except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
-        raise
-
-
 async def start_app():
     """Запуск приложения"""
-    app = create_app()
 
     await init_db()
+    app = create_app()
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, config.api.host, config.api.port)
 
-    logger.info(f"Starting server on http://{config.api.host}:{config.api.port}")
-    logger.info(f"API Documentation: http://{config.api.host}:{config.api.port}/api/docs")
+    host = os.getenv('HOST', '0.0.0.0')
+    port = int(os.getenv('PORT', 8000))
+
+    site = web.TCPSite(runner, host, port)
+
+    logger.info(f" Advertisements API запущен!")
+    logger.info(f" Адрес: http://{host}:{port}")
+    logger.info(f" Документация: http://{host}:{port}/api/docs")
+    logger.info("")
+    logger.info("   Примеры использования:")
+    logger.info("   Регистрация: POST /api/register")
+    logger.info("   Вход: POST /api/login")
+    logger.info("   Все объявления: GET /api/ads")
+    logger.info("   Создать объявление: POST /api/ads (требуется токен)")
 
     await site.start()
 
     try:
         await asyncio.Event().wait()
-    except asyncio.CancelledError:
-        pass
+    except KeyboardInterrupt:
+        logger.info("Сервер остановлен пользователем")
+    finally:
+        await runner.cleanup()
 
 
 async def shutdown():
-    """Завершение работы приложения"""
-    logger.info("Shutting down...")
+    """Завершение работы"""
+    logger.info("Завершение работы...")
     await Database.close_pool()
-    logger.info("Shutdown complete")
 
 
 def main():
-    """Точка входа в приложение"""
+    """Точка входа"""
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(start_app())
+        asyncio.run(start_app())
     except KeyboardInterrupt:
-        logger.info("Server stopped by user")
+        logger.info("Сервер остановлен пользователем")
     except Exception as e:
-        logger.error(f"Server failed: {e}")
+        logger.error(f"Ошибка при запуске сервера: {e}")
     finally:
-        loop.run_until_complete(shutdown())
-        loop.close()
+        asyncio.run(shutdown())
 
 
 if __name__ == '__main__':
