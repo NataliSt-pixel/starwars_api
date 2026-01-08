@@ -2,9 +2,10 @@ import jwt
 from datetime import datetime, timedelta
 from aiohttp import web
 import json
-from ...database import get_user_by_email, create_user as db_create_user
+from ...database import get_user_by_email, create_user
 from ...security import verify_password, get_password_hash
 from ...config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
+from ...validators import validate_user_registration, validate_login, ValidationError
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -32,13 +33,20 @@ async def register(request):
     """Register new user"""
     try:
         data = await request.json()
-        required_fields = ['email', 'password', 'username']
-        for field in required_fields:
-            if field not in data:
-                raise web.HTTPBadRequest(reason=f"Missing required field: {field}")
+        errors = validate_user_registration(data)
+        if errors:
+            return web.json_response(
+                {"errors": errors},
+                status=400
+            )
+
         existing_user = await get_user_by_email(data['email'])
         if existing_user:
-            raise web.HTTPBadRequest(reason="Email already registered")
+            return web.json_response(
+                {"error": "Email already registered"},
+                status=400
+            )
+
         hashed_password = get_password_hash(data['password'])
 
         user_data = {
@@ -48,7 +56,7 @@ async def register(request):
             'created_at': datetime.utcnow()
         }
 
-        user_id = await db_create_user(user_data)
+        user_id = await create_user(user_data)
 
         return web.json_response(
             {
@@ -62,22 +70,34 @@ async def register(request):
         )
 
     except json.JSONDecodeError:
-        raise web.HTTPBadRequest(reason="Invalid JSON")
+        return web.json_response(
+            {"error": "Invalid JSON"},
+            status=400
+        )
     except Exception as e:
-        raise web.HTTPInternalServerError(reason=str(e))
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500
+        )
 
 
 async def login(request):
     """Login user and return access token"""
     try:
         data = await request.json()
-        required_fields = ['email', 'password']
-        for field in required_fields:
-            if field not in data:
-                raise web.HTTPBadRequest(reason=f"Missing required field: {field}")
+        errors = validate_login(data)
+        if errors:
+            return web.json_response(
+                {"errors": errors},
+                status=400
+            )
+
         user = await get_user_by_email(data['email'])
         if not user or not verify_password(data['password'], user['hashed_password']):
-            raise web.HTTPUnauthorized(reason="Incorrect email or password")
+            return web.json_response(
+                {"error": "Incorrect email or password"},
+                status=401
+            )
 
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
@@ -94,6 +114,12 @@ async def login(request):
         })
 
     except json.JSONDecodeError:
-        raise web.HTTPBadRequest(reason="Invalid JSON")
+        return web.json_response(
+            {"error": "Invalid JSON"},
+            status=400
+        )
     except Exception as e:
-        raise web.HTTPInternalServerError(reason=str(e))
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500
+        )

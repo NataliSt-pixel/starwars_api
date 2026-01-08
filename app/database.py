@@ -5,6 +5,7 @@ from typing import Optional, List, Dict, Any
 import logging
 
 logger = logging.getLogger(__name__)
+
 _db = None
 
 
@@ -40,52 +41,10 @@ async def init_db(app=None):
 
         await _db.commit()
         logger.info("<Database initialized successfully>")
-        await create_test_user()
 
     except Exception as e:
         logger.error(f"<Database initialization failed: {e}>")
         raise
-
-
-async def create_test_user():
-    """Create a test user if doesn't exist (for testing)"""
-    try:
-        from .security import get_password_hash
-
-        test_email = "test@example.com"
-        existing_user = await get_user_by_email(test_email)
-
-        if not existing_user:
-            user_data = {
-                'email': test_email,
-                'username': 'testuser',
-                'hashed_password': get_password_hash('testpassword'),
-                'created_at': datetime.utcnow()
-            }
-
-            cursor = await _db.execute(
-                """INSERT INTO users (email, username, hashed_password, created_at) 
-                   VALUES (?, ?, ?, ?)""",
-                (user_data['email'], user_data['username'],
-                 user_data['hashed_password'], user_data['created_at'])
-            )
-            await _db.commit()
-            user_id = cursor.lastrowid
-            await cursor.close()
-
-            logger.info(f"<Test user created with ID: {user_id}>")
-            ad_data = {
-                'title': 'Test Ad',
-                'description': 'This is a test advertisement',
-                'owner_id': user_id,
-                'created_at': datetime.utcnow()
-            }
-
-            await create_ad(ad_data)
-            logger.info("<Test ad created>")
-
-    except Exception as e:
-        logger.warning(f"<Could not create test user: {e}>")
 
 
 async def close_db(app=None):

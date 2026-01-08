@@ -1,13 +1,8 @@
 from aiohttp import web
 import json
 from datetime import datetime
-from ...database import (
-    create_ad as db_create_ad,
-    get_ad as db_get_ad,
-    get_all_ads as db_get_all_ads,
-    update_ad as db_update_ad,
-    delete_ad as db_delete_ad
-)
+from ...database import create_ad, get_ad, get_all_ads, update_ad, delete_ad
+from ...validators import validate_ad_creation, validate_ad_update
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -22,7 +17,10 @@ def login_required(handler):
 
     async def decorated(request, *args, **kwargs):
         if 'user' not in request:
-            raise web.HTTPUnauthorized(reason="Authentication required")
+            return web.json_response(
+                {"error": "Authentication required"},
+                status=401
+            )
         return await handler(request, *args, **kwargs)
 
     return decorated
@@ -34,8 +32,12 @@ async def create_ad_handler(request):
     try:
         data = await request.json()
         user = request['user']
-        if 'title' not in data:
-            raise web.HTTPBadRequest(reason="Title is required")
+        errors = validate_ad_creation(data)
+        if errors:
+            return web.json_response(
+                {"errors": errors},
+                status=400
+            )
 
         ad_data = {
             'title': data['title'],
@@ -44,7 +46,7 @@ async def create_ad_handler(request):
             'created_at': datetime.utcnow()
         }
 
-        ad_id = await db_create_ad(ad_data)
+        ad_id = await create_ad(ad_data)
 
         return web.json_response(
             {
@@ -57,19 +59,28 @@ async def create_ad_handler(request):
         )
 
     except json.JSONDecodeError:
-        raise web.HTTPBadRequest(reason="Invalid JSON")
+        return web.json_response(
+            {"error": "Invalid JSON"},
+            status=400
+        )
     except Exception as e:
-        raise web.HTTPInternalServerError(reason=str(e))
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500
+        )
 
 
 async def get_ad_handler(request):
     """Get ad by ID"""
     try:
         ad_id = int(request.match_info['id'])
-        ad = await db_get_ad(ad_id)
+        ad = await get_ad(ad_id)
 
         if not ad:
-            raise web.HTTPNotFound(reason="Ad not found")
+            return web.json_response(
+                {"error": "Ad not found"},
+                status=404
+            )
 
         return web.json_response(
             ad,
@@ -77,15 +88,21 @@ async def get_ad_handler(request):
         )
 
     except ValueError:
-        raise web.HTTPBadRequest(reason="Invalid ad ID")
+        return web.json_response(
+            {"error": "Invalid ad ID"},
+            status=400
+        )
     except Exception as e:
-        raise web.HTTPInternalServerError(reason=str(e))
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500
+        )
 
 
 async def get_ads_handler(request):
     """Get all ads"""
     try:
-        ads = await db_get_all_ads()
+        ads = await get_all_ads()
 
         return web.json_response(
             ads,
@@ -93,7 +110,10 @@ async def get_ads_handler(request):
         )
 
     except Exception as e:
-        raise web.HTTPInternalServerError(reason=str(e))
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500
+        )
 
 
 @login_required
@@ -103,23 +123,35 @@ async def update_ad_handler(request):
         ad_id = int(request.match_info['id'])
         data = await request.json()
         user = request['user']
-        ad = await db_get_ad(ad_id)
+        ad = await get_ad(ad_id)
         if not ad:
-            raise web.HTTPNotFound(reason="Ad not found")
+            return web.json_response(
+                {"error": "Ad not found"},
+                status=404
+            )
 
         if ad['owner_id'] != user['id']:
-            raise web.HTTPForbidden(reason="You can only update your own ads")
-        allowed_fields = ['title', 'description']
+            return web.json_response(
+                {"error": "You can only update your own ads"},
+                status=403
+            )
+
+        errors = validate_ad_update(data)
+        if errors:
+            return web.json_response(
+                {"errors": errors},
+                status=400
+            )
+
         update_data = {}
+        allowed_fields = ['title', 'description']
 
         for field in allowed_fields:
             if field in data:
                 update_data[field] = data[field]
 
-        if not update_data:
-            raise web.HTTPBadRequest(reason="No fields to update")
-
-        await db_update_ad(ad_id, update_data)
+        if update_data:
+            await update_ad(ad_id, update_data)
 
         return web.json_response(
             {'message': 'Ad updated successfully'},
@@ -127,11 +159,20 @@ async def update_ad_handler(request):
         )
 
     except ValueError:
-        raise web.HTTPBadRequest(reason="Invalid ad ID")
+        return web.json_response(
+            {"error": "Invalid ad ID"},
+            status=400
+        )
     except json.JSONDecodeError:
-        raise web.HTTPBadRequest(reason="Invalid JSON")
+        return web.json_response(
+            {"error": "Invalid JSON"},
+            status=400
+        )
     except Exception as e:
-        raise web.HTTPInternalServerError(reason=str(e))
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500
+        )
 
 
 @login_required
@@ -140,14 +181,20 @@ async def delete_ad_handler(request):
     try:
         ad_id = int(request.match_info['id'])
         user = request['user']
-        ad = await db_get_ad(ad_id)
+        ad = await get_ad(ad_id)
         if not ad:
-            raise web.HTTPNotFound(reason="Ad not found")
+            return web.json_response(
+                {"error": "Ad not found"},
+                status=404
+            )
 
         if ad['owner_id'] != user['id']:
-            raise web.HTTPForbidden(reason="You can only delete your own ads")
+            return web.json_response(
+                {"error": "You can only delete your own ads"},
+                status=403
+            )
 
-        await db_delete_ad(ad_id)
+        await delete_ad(ad_id)
 
         return web.json_response(
             {'message': 'Ad deleted successfully'},
@@ -155,6 +202,12 @@ async def delete_ad_handler(request):
         )
 
     except ValueError:
-        raise web.HTTPBadRequest(reason="Invalid ad ID")
+        return web.json_response(
+            {"error": "Invalid ad ID"},
+            status=400
+        )
     except Exception as e:
-        raise web.HTTPInternalServerError(reason=str(e))
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500
+        )

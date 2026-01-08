@@ -8,16 +8,20 @@ from .config import SECRET_KEY, ALGORITHM
 @web.middleware
 async def auth_middleware(request, handler):
     """Authentication middleware"""
+
     public_paths = [
         '/api/auth/register',
         '/api/auth/login',
         '/health',
-        '/'
+        '/',
+        '/api/ads'
     ]
+
+    if request.path.startswith('/api/ads') and request.method == 'GET':
+        return await handler(request)
 
     if any(request.path.startswith(path) for path in public_paths):
         return await handler(request)
-
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Bearer '):
         raise web.HTTPUnauthorized(reason="Missing or invalid authorization header")
